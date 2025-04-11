@@ -1,0 +1,169 @@
+#!/var/ossec/framework/python/bin/python3
+
+import sys
+import os
+from socket import socket, AF_UNIX, SOCK_DGRAM
+from datetime import date, datetime, timedelta
+import time
+import requests
+from requests.exceptions import ConnectionError
+import json
+import ipaddress
+import hashlib
+import re
+
+pwd = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+socket_addr = "{0}/queue/sockets/queue".format(pwd)
+
+
+def send_event(msg, agent=None):
+    debug(f"#Misp sending message to wazuh server {msg}")
+    if not agent or agent["id"] == "000":
+        string = "1:misp:{0}".format(json.dumps(msg))
+        debug(f"#Misp - sending {string}")
+    else:
+        string = "1:[{0}] ({1}) {2}->misp:{3}".format(
+            agent["id"],
+            agent["name"],
+            agent["ip"] if "ip" in agent else "any",
+            json.dumps(msg),
+        )
+        debug(f"#Misp --> sending to  server {string}")
+    sock = socket(AF_UNIX, SOCK_DGRAM)
+    sock.connect(socket_addr)
+    sock.send(string.encode())
+    sock.close()
+
+
+LOGFILE = f'{pwd}/logs/integrations.log'
+API_URL = "http://192.168.128.43:8000/api/performance/"
+headers = {
+    'Content-Type': 'application/json'
+}
+
+false = False
+debug_enabled = True
+# Read configuration parameters
+alert_file = open(sys.argv[1])
+# Read the alert file
+alert = json.loads(alert_file.read())
+alert_file.close()
+# New Alert Output if MISP Alert or Error calling the API
+alert_output = {}
+# MISP Server Base URL
+
+def debug(msg: str) -> None:
+    """Log the message in the log file with the timestamp, if debug flag
+    is enabled
+
+    Parameters
+    ----------
+    msg : str
+        The message to be logged.
+    """
+    if debug_enabled:
+        print(msg)
+        #with open(LOGFILE, 'a') as f:
+        #    f.write(msg + '\n')
+
+def sendAssetApi(data):
+    # Sending POST request
+    try:
+        response = requests.post(API_URL, json=data, headers=headers)
+        debug(f"{response.json()}")
+    except requests.exceptions.RequestException as e:
+        debug(f"ERROR -> {e}")
+
+## Extract Sysmon for Windows/Sysmon for Linux and Sysmon Event ID
+#debug(f"{alert}")
+
+alert_id = str(alert['rule']['id']).strip()
+agent_id = alert['agent']['id']
+full_log = alert['full_log']
+
+
+def check_device_exists(device_id):
+    url = f"{API_URL}{device_id}"
+    response = requests.get(url, headers=headers)
+
+    return response.status_code == 200
+
+
+def create_device(data):
+    response = requests.post(API_URL, json=data, headers=headers)
+
+    if response.status_code in [201, 200]:
+        debug(f"device created: {response.json()}")
+    else:
+        debug(f"device not created{response.text}")
+
+
+def upload_device(data, device_id):
+    url = f"{API_URL}{device_id}/"
+    response = requests.patch(url, json=data, headers=headers)
+    if response.status_code in [201, 204]:
+        print(response.json())
+    else:
+        print(response.text)
+
+
+def main(data, device_id):
+    #debug(f"device_id {device_id}, {type(device_id)}")
+    #debug(f"pushing to api {data}")
+
+    if check_device_exists(device_id):
+        upload_device(data, device_id)
+    else:
+        create_device(data)
+
+
+debug(f"{alert_id}, {type(alert_id)}, {type(full_log)}")
+
+if alert_id == "302000":  # if it is memory performance
+    memory_available = full_log.split(',')[2].split(':')[1]
+    data = {
+        "id": agent_id,
+        "ram_free": memory_available
+    }
+    main(data, agent_id)
+    ##debug(f"Niceo, {memory_available}")
+elif alert_id == "302003":  # if it is disk performance
+    disk_available = full_log.split(',')[2].split(':')[1]
+    data = {
+        "id": agent_id,
+        "disk_free": disk_available
+    }
+    #debug(f"Disk,{full_log}")
+    
+elif alert_id == "302006":
+    byte_received = full_log.split(',')[2].split(':')[1]
+    data = {
+       'id': agent_id,
+       'receive_bytes': byte_received
+    }
+    main(data, agent_id)
+    debug(f" Network received {full_log}")
+    
+elif alert_id == '302007':
+     byte_sent = full_log.split(',')[2].split(':')[1]
+     data = {
+        'id': agent_id,
+        'sent_bytes': byte_sent
+     }
+     main(data, agent_id)
+     debug(f"Network sent {full_log}")
+     
+elif alert_id == "303000":  # if it is cpu performance
+    cpu_usage = full_log.split(',')[2].split(':')[1]
+    data = {
+        "id": agent_id,
+        "cpu_usage": cpu_usage
+    }
+    #debug(f'Cpu Usage,{cpu_usage}')
+else:
+    pass
+
+#debug(f"{alert_id},{agent_id},{full_log}")
+
+main(data, agent_id)
+
